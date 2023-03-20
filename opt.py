@@ -121,5 +121,17 @@ def get_opts():
                         help='experiment name')
     parser.add_argument('--refresh_every', type=int, default=1,
                         help='print the progress bar every X steps')
+    ##dff
+    #parser.add_argument('--feature_directory', type=str, default=None)
+    parser.add_argument('--feature_dim', type=int, default=None)
+    parser.add_argument('--use_semantics', default=False, action="store_true",
+                        help='whether to use semantic labels')
+    parser.add_argument('--continue_train_semantic', default=False, action="store_true",
+                        help='whether to use ckpt of rgb')
+    parser.add_argument('--clipnerf_text', nargs='*', type=str, default=None)
+    parser.add_argument('--features_path', type=str, default=None)
+    parser.add_argument('--num_of_img', type=int, default=None)
+    
+    ##dff
 
     return parser.parse_args()

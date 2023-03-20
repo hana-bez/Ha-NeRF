@@ -45,8 +45,9 @@ class HaNeRFLoss(nn.Module):
         # self.Annealing = CosineAnnealingWeight(max = hparams.maskrs_max, min = hparams.maskrs_min, Tmax = hparams.num_epochs-1)
         self.Annealing = ExponentialAnnealingWeight(max = hparams.maskrs_max, min = hparams.maskrs_min, k = hparams.maskrs_k)
         self.mse_loss = nn.MSELoss()
-
-    def forward(self, inputs, targets, hparams, global_step):
+    ###dff
+    def forward(self, inputs, targets, hparams, global_step,features_lseg=None):
+    ###dff
         ret = {}
 
         if 'a_embedded' in inputs:
@@ -56,6 +57,9 @@ class HaNeRFLoss(nn.Module):
                 ret['mode_seeking'] = hparams.weightMS * 1 / \
                   ((torch.mean(torch.abs(inputs['rgb_fine'].detach() - inputs['rgb_fine_random'])) / \
                   torch.mean(torch.abs(inputs['a_embedded'].detach() - inputs['a_embedded_random'].detach()))) + 1 * 1e-5)
+                #ret['mode_seeking'] = hparams.weightMS * 1 / \
+                #  ((torch.mean(torch.abs(inputs['rgb_fine'].detach() - inputs['rgb_fine_random'])) / \
+                #  torch.mean(torch.abs(inputs['a_embedded'].detach() - inputs['a_embedded_random'].detach() + 1e-6))) + 1 * 1e-5)
 
         if 'out_mask' in inputs:
             mask = inputs['out_mask']
@@ -70,8 +74,20 @@ class HaNeRFLoss(nn.Module):
             else:
                 ret['f_l'] = 0.5 * ((inputs['rgb_fine']-targets)**2).mean()
 
+        ###dff
+        if 'features_coarse' in inputs:
+            ret['features_coarse'] = ((inputs['features_coarse'] - features_lseg) ** 2).sum(-1).mean() 
+        if 'features_fine' in inputs:
+            ret['features_fine'] = ((inputs['features_fine'] - features_lseg) ** 2).sum(-1).mean() 
+        ###dff
+        feature_coeff=4e-2
         for k, v in ret.items():
             ret[k] = self.coef * v
+            ###dff
+            if k=='features_coarse' or k=='features_fine':
+                ret[k] = feature_coeff * v
+            ###dff
+                
 
         return ret, self.Annealing.getWeight(global_step)
 

@@ -35,7 +35,10 @@ class NeRF(nn.Module):
                  D=8, W=256, skips=[4],
                  in_channels_xyz=63, in_channels_dir=27,
                  encode_appearance=False, in_channels_a=48,
-                 encode_random=False):
+                 encode_random=False,
+                 ###dff
+                 use_semantics=False,out_feature_dim=512,skip_feature=False):
+                 ###dff
 
         super().__init__()
         self.typ = typ
@@ -44,11 +47,17 @@ class NeRF(nn.Module):
         self.skips = skips
         self.in_channels_xyz = in_channels_xyz
         self.in_channels_dir = in_channels_dir
+        self.skip_feature = skip_feature
+        
 
         # self.encode_appearance = encode_appearance
         self.encode_appearance = False if typ=='coarse' else encode_appearance
         self.in_channels_a = in_channels_a if encode_appearance else 0
         self.encode_random = False if typ=='coarse' else encode_random
+        ###dff
+        self.use_semantics = use_semantics
+        ###dff
+        
 
         # xyz encoding layers
         for i in range(D):
@@ -69,6 +78,18 @@ class NeRF(nn.Module):
         self.dir_encoding = nn.Sequential(
                         nn.Linear(W+in_channels_dir+self.in_channels_a, W//2), nn.ReLU(True))
         self.static_rgb = nn.Sequential(nn.Linear(W//2, 3), nn.Sigmoid())
+        
+        ###dff
+        if use_semantics:
+            hidden_dim = 128
+            self.features =  nn.Sequential(nn.Linear(W, hidden_dim),
+                                          nn.ReLU(),
+                                          nn.Linear(hidden_dim, hidden_dim),
+                                          nn.ReLU(),
+                                          nn.Linear(hidden_dim, hidden_dim),
+                                          nn.ReLU(),
+                                          nn.Linear(hidden_dim, out_feature_dim))
+        ###dff
 
 
     def forward(self, x, sigma_only=False, output_random=True):
@@ -97,17 +118,35 @@ class NeRF(nn.Module):
         static_sigma = self.static_sigma(xyz_) # (B, 1)
         if sigma_only:
             return static_sigma
+        
 
         xyz_encoding_final = self.xyz_encoding_final(xyz_)
         dir_encoding_input = torch.cat([xyz_encoding_final, input_dir_a], 1)
         dir_encoding = self.dir_encoding(dir_encoding_input)
         static_rgb = self.static_rgb(dir_encoding) # (B, 3)
         static = torch.cat([static_rgb, static_sigma], 1) # (B, 4)
+        
+        ###dff
+        outputs = static
+        if self.use_semantics and not self.skip_feature:
+            feature_out = self.features(xyz_encoding_final)
+            outputs = torch.cat([outputs, feature_out], 1)
+        ###dff
 
         if output_random:
             dir_encoding_input_random = torch.cat([xyz_encoding_final.detach(), input_dir_a_random.detach()], 1)
             dir_encoding_random = self.dir_encoding(dir_encoding_input_random)
             static_rgb_random = self.static_rgb(dir_encoding_random) # (B, 3)
-            return torch.cat([static, static_rgb_random], 1) # (B, 7)
+            ###dff
+            
+            return torch.cat([outputs, static_rgb_random], 1) 
+            #return torch.cat([static, static_rgb_random], 1) # (B, 7)
+            ###dff
+            
+        ###dff
+        return outputs
+        #return static
+        ###dff
+    
 
-        return static
+

@@ -7,18 +7,31 @@ import pandas as pd
 import pickle
 from PIL import Image
 from torchvision import transforms as T
-
 from .ray_utils import *
 from .colmap_utils import \
     read_cameras_binary, read_images_binary, read_points3d_binary
+###dff
+import feature_utils 
+import clip_utils 
+import os.path
+###dff
 
 from math import sqrt, exp
 import random
 
 from . import global_val
+import pandas
+
+def get_k_files(k, csv_path, prompt):
+    xls_file = pandas.read_csv(csv_path)
+    col = xls_file[prompt]
+    col_sorted = col.sort_values(by=prompt, ascending=False)
+    files = col_sorted[:k]
+    names = xls_file['filename'][files.index]
+    return names.values.tolist()
 
 class PhototourismDataset(Dataset):
-    def __init__(self, root_dir, split='train', img_downscale=1, val_num=1, use_cache=False, batch_size=1024, scale_anneal=-1, min_scale=0.25):
+    def __init__(self, root_dir, split='train', img_downscale=1, val_num=1, use_cache=False, batch_size=1024, scale_anneal=-1, min_scale=0.25, use_semantics=False, feature_dim=512,features_path="",num_of_img=None):
         """
         img_downscale: how much scale to downsample the training images.
                        The original image sizes are around 500~100, so value of 1 or 2
@@ -33,11 +46,17 @@ class PhototourismDataset(Dataset):
         self.split = split
         assert img_downscale >= 1, 'image can only be downsampled, please set img_downscale>=1!'
         self.img_downscale = img_downscale
+        ###dff
+        self.use_semantics = use_semantics
+        self.feature_dim = feature_dim
+        self.features_path=features_path
+        self.num_of_img = num_of_img
+        ###dff
 
         if ('hagia_sophia_interior' in self.root_dir) or ('taj_mahal' in self.root_dir):
             self.img_downscale_appearance = 4
         else:
-            self.img_downscale_appearance = 8
+            self.img_downscale_appearance = 4
 
         if split == 'val': # image downscale=1 will cause OOM in val mode
             self.img_downscale = max(2, self.img_downscale)
@@ -61,6 +80,9 @@ class PhototourismDataset(Dataset):
         self.files = pd.read_csv(tsv, sep='\t')
         self.files = self.files[~self.files['id'].isnull()] # remove data without id
         self.files.reset_index(inplace=True, drop=True)
+        ####
+        #self.files = self.files[:5] 
+        ####
 
         # Step 1. load image paths
         # Attention! The 'id' column in the tsv is BROKEN, don't use it!!!!
@@ -76,12 +98,17 @@ class PhototourismDataset(Dataset):
             for v in imdata.values():
                 img_path_to_id[v.name] = v.id
             self.img_ids = []
+            ####
+            self.cam_ids = []
+            ####
             self.image_paths = {} # {id: filename}
             for filename in list(self.files['filename']):
                 if filename in img_path_to_id:
                     id_ = img_path_to_id[filename]
                     self.image_paths[id_] = filename
                     self.img_ids += [id_]
+                    ####
+                    self.cam_ids += [imdata[id_].camera_id]
 
         # Step 2: read and rescale camera intrinsics
         if self.use_cache:
@@ -90,18 +117,47 @@ class PhototourismDataset(Dataset):
         else:
             self.Ks = {} # {id: K}
             camdata = read_cameras_binary(os.path.join(self.root_dir, 'dense/sparse/cameras.bin'))
-            for id_ in self.img_ids:
+            for i,id_ in enumerate(self.img_ids):
                 K = np.zeros((3, 3), dtype=np.float32)
-                cam = camdata[id_]
-                img_w, img_h = int(cam.params[2]*2), int(cam.params[3]*2)
-                img_w_, img_h_ = img_w//self.img_downscale, img_h//self.img_downscale
-                K[0, 0] = cam.params[0]*img_w_/img_w # fx
-                K[1, 1] = cam.params[1]*img_h_/img_h # fy
-                K[0, 2] = cam.params[2]*img_w_/img_w # cx
-                K[1, 2] = cam.params[3]*img_h_/img_h # cy
-                K[2, 2] = 1
-                self.Ks[id_] = K
+                cam = camdata.get(self.cam_ids[i])
+                if cam is not None:
 
+                    img_w, img_h = int(cam.params[2]*2), int(cam.params[3]*2)
+
+                    # I added *2 if the img_downscale = 1 but accutaly the image was downscaled before that.
+                    img_w_, img_h_ = img_w//(self.img_downscale*1), img_h//(self.img_downscale*1)
+
+
+                    K[0, 0] = cam.params[0]*img_w_/img_w # fx
+                    K[1, 1] = cam.params[1]*img_h_/img_h # fy
+                    K[0, 2] = cam.params[2]*img_w_/img_w # cx
+                    K[1, 2] = cam.params[3]*img_h_/img_h # cy
+                    K[2, 2] = 1
+                    self.Ks[id_] = K
+
+                else:
+                    print('Error:' + str(id_))
+                    ####
+#
+#        # Step 2: read and rescale camera intrinsics
+#        if self.use_cache:
+#            with open(os.path.join(self.root_dir, f'cache/Ks{self.img_downscale}.pkl'), 'rb') as f:
+#                self.Ks = pickle.load(f)
+#        else:
+#            self.Ks = {} # {id: K}
+#            camdata = read_cameras_binary(os.path.join(self.root_dir, 'dense/sparse/cameras.bin'))
+#            for id_ in self.img_ids:
+#                K = np.zeros((3, 3), dtype=np.float32)
+#                cam = camdata[id_]
+#                img_w, img_h = int(cam.params[2]*2), int(cam.params[3]*2)
+#                img_w_, img_h_ = img_w//self.img_downscale, img_h//self.img_downscale
+#                K[0, 0] = cam.params[0]*img_w_/img_w # fx
+#                K[1, 1] = cam.params[1]*img_h_/img_h # fy
+#                K[0, 2] = cam.params[2]*img_w_/img_w # cx
+#                K[1, 2] = cam.params[3]*img_h_/img_h # cy
+#                K[2, 2] = 1
+#                self.Ks[id_] = K
+#
         # Step 3: read c2w poses (of the images in tsv file only) and correct the order
         if self.use_cache:
             self.poses = np.load(os.path.join(self.root_dir, 'cache/poses.npy'))
@@ -146,7 +202,26 @@ class PhototourismDataset(Dataset):
                 self.fars[k] /= scale_factor
             self.xyz_world /= scale_factor
         self.poses_dict = {id_: self.poses[i] for i, id_ in enumerate(self.img_ids)}
+        
+        
+        ###dff
+        feature_folder = None
+        feature_paths = {}
+        if self.use_semantics:
+            if not self.features_path:
+                feature_folder = os.path.join(self.root_dir, 'rgb_feature_langseg')
+            else:
+                feature_folder = self.features_path
+    
+            for i, id_ in enumerate(self.img_ids):
+                feature_paths[id_] = os.path.join(feature_folder, os.path.splitext(self.image_paths[id_].split(".")[0])[0] + '_fmap_CxHxW.pt')
+            #print("feature_paths", feature_paths)
+        if self.num_of_img is not None:
+            idx_to_use = [self.img_ids[random.randint(0,len(self.img_ids)-1)] for id in range(self.num_of_img)]
             
+            
+        ###dff    
+        
         # Step 5. split the img_ids (the number of images is verfied to match that in the paper)
         self.img_ids_train = [id_ for i, id_ in enumerate(self.img_ids) 
                                     if self.files.loc[i, 'split']=='train']
@@ -177,38 +252,95 @@ class PhototourismDataset(Dataset):
                 self.all_rgbs = []
                 self.all_imgs = []
                 self.all_imgs_wh = []
-                for id_ in self.img_ids_train:
-                    c2w = torch.FloatTensor(self.poses_dict[id_])
-
-                    img = Image.open(os.path.join(self.root_dir, 'dense/images',
-                                                  self.image_paths[id_])).convert('RGB')
-                    img_w, img_h = img.size
-                    if self.img_downscale > 1:
-                        img_w = img_w//self.img_downscale
-                        img_h = img_h//self.img_downscale
-                        img_rs = img.resize((img_w, img_h), Image.LANCZOS)
-                    img_rs = self.transform(img_rs) # (3, h, w)
-
-                    img_8 = img.resize((img_w//self.img_downscale_appearance, img_h//self.img_downscale_appearance), Image.LANCZOS)
-                    img_8 = self.normalize(self.transform(img_8)) # (3, h, w)
-                    self.all_imgs += [self.normalize(img_8)]
-                    self.all_imgs_wh += [torch.Tensor([img_w, img_h]).unsqueeze(0)]
-                    img_rs = img_rs.view(3, -1).permute(1, 0) # (h*w, 3) RGB
-                    self.all_rgbs += [img_rs]
-                    
-                    directions = get_ray_directions(img_h, img_w, self.Ks[id_])
-                    rays_o, rays_d = get_rays(directions, c2w)
-                    rays_t = id_ * torch.ones(len(rays_o), 1)
-
-                    self.all_rays += [torch.cat([rays_o, rays_d,
-                                                self.nears[id_]*torch.ones_like(rays_o[:, :1]),
-                                                self.fars[id_]*torch.ones_like(rays_o[:, :1]),
-                                                rays_t],
-                                                1)] # (h*w, 8)
+                ###dff
+                self.all_features = []
+                ###dff
+                
+                try:
+                    q = 0
+                    for id_ in self.img_ids_train:
+                        
+                        print(q)
+                        q = q + 1
+                        
+                        ###dff
+                        if (self.num_of_img is not None) and (id_ not in idx_to_use):
+                            continue 
+                        if self.use_semantics:
+                            if not os.path.isfile(feature_paths[id_]):
+                                continue
+                        #if q > 280:
+                        #    print("check")
+                        ###dff
+                        
+                        c2w = torch.FloatTensor(self.poses_dict[id_])
+                        
+                        img = Image.open(os.path.join(self.root_dir, 'dense/images',
+                                                      self.image_paths[id_])).convert('RGB')
+                        img_w, img_h = img.size
+                        if self.img_downscale > 1:
+                            img_w = img_w//self.img_downscale
+                            img_h = img_h//self.img_downscale
+                            img_rs = img.resize((img_w, img_h), Image.LANCZOS)
+                        img_rs = self.transform(img_rs) # (3, h, w)
+    
+                        img_8 = img.resize((img_w//self.img_downscale_appearance, img_h//self.img_downscale_appearance), Image.LANCZOS)
+                        ####
+                        const_minSize = 33
+                        if img_8.size[0] < const_minSize:
+                            a = img_8.size[0] / const_minSize
+                            img_8 = img.resize((int(img_8.size[0] // a), int(img_8.size[1] //a)),Image.LANCZOS)
+                        if img_8.size[1] < const_minSize:
+                            a = img_8.size[1] / const_minSize
+                            img_8 = img.resize((int(img_8.size[0] // a), int(img_8.size[1] //a)),Image.LANCZOS)
+                        ####
+                        
+                        img_8 = self.normalize(self.transform(img_8)) # (3, h, w)
+                        self.all_imgs += [img_8]
+                        self.all_imgs_wh += [torch.Tensor([img_w, img_h]).unsqueeze(0)]
+                        img_rs = img_rs.view(3, -1).permute(1, 0) # (h*w, 3) RGB
+                        self.all_rgbs += [img_rs]
+                        
+                        ###dff
+                        if feature_paths:
+                            img_w, img_h = img.size
+                            if self.img_downscale > 1:
+                                w_ds = img_w//self.img_downscale
+                                h_ds = img_h//self.img_downscale
+                            pix_idxs = np.arange(w_ds*h_ds)
+                            feature_map = torch.load(feature_paths[id_])[None].float()  # chw->1chw
+                            u = (pix_idxs % w_ds / w_ds) * 2 - 1
+                            v = (pix_idxs // w_ds/ h_ds) * 2 - 1
+                            with torch.no_grad():
+                                sampler = torch.tensor(np.stack([u, v], axis=-1)[None, None]).float()  # N2->11N2
+                                # TODO: sparse supervision
+                                feats = torch.nn.functional.grid_sample(feature_map, sampler, mode='bilinear', align_corners=True)  # 1c1N
+                                feats = feats[0, :, 0].T  # 1c1N->cN->Nc
+                            self.all_features.append(feats)
+                        ###dff
+                        
+                        directions = get_ray_directions(img_h, img_w, self.Ks[id_])
+                        rays_o, rays_d = get_rays(directions, c2w)
+                        rays_t = id_ * torch.ones(len(rays_o), 1)
+    
+                        self.all_rays += [torch.cat([rays_o, rays_d,
+                                                    self.nears[id_]*torch.ones_like(rays_o[:, :1]),
+                                                    self.fars[id_]*torch.ones_like(rays_o[:, :1]),
+                                                    rays_t],
+                                                    1)] # (h*w, 8)
+                except:
+                    print("it fails to upload data")
                     
                 self.all_rays = torch.cat(self.all_rays, 0) # ((N_images-1)*h*w, 8)
                 self.all_rgbs = torch.cat(self.all_rgbs, 0) # ((N_images-1)*h*w, 3)
                 self.all_imgs_wh = torch.cat(self.all_imgs_wh, 0) # ((N_images-1)*h*w, 3)
+                ###dff
+                if self.use_semantics:
+                    self.all_features = torch.cat(self.all_features, 0) # ((N_images-1)*h*w, 512)
+                              
+                
+    
+                ###dff
         
         elif self.split in ['val', 'test_train']: # use the first image as val image (also in train)
             self.val_id = self.img_ids_train[0]
@@ -216,6 +348,7 @@ class PhototourismDataset(Dataset):
         else: # for testing, create a parametric rendering path
             # test poses and appearance index are defined in eval.py
             pass
+        
 
     def define_transforms(self):
         self.transform = T.ToTensor()
@@ -257,16 +390,40 @@ class PhototourismDataset(Dataset):
             uv_sample = torch.cat((h_sb.permute(1, 0).contiguous().view(-1,1), w_sb.permute(1, 0).contiguous().view(-1,1)), -1)
 
             rgb_sample_points = (img_sample_points + (self.all_imgs_wh[:sample_ts, 0]*self.all_imgs_wh[:sample_ts, 1]).sum()).long()
-
-            sample = {'rays': self.all_rays[rgb_sample_points, :8],
-                      'ts': self.all_rays[rgb_sample_points, 8].long(),
-                      'rgbs': self.all_rgbs[rgb_sample_points],
-                      'whole_img': img,
-                      'rgb_idx': img_sample_points,
-                      'min_scale_cur': min_scale_cur,
-                      'img_wh': self.all_imgs_wh[sample_ts],
-                      'uv_sample': uv_sample}
-
+            ###dff
+            ##feature_map = self.all_features[sample_ts][None].float()  # chw->1chw
+            ##u = (img_sample_points % img_w / img_w) * 2 - 1
+            ##v = (img_sample_points // img_w / img_h) * 2 - 1
+            ##
+            ##with torch.no_grad():
+            ##    sampler = torch.tensor(np.stack([u, v], axis=-1)[None, None]).float()  # N2->11N2
+            ##    # TODO: sparse supervision
+            ##    feats = torch.nn.functional.grid_sample(feature_map, sampler, mode='bilinear', align_corners=True)  # 1c1N
+            ##    feats = feats[0, :, 0].T  # 1c1N->cN->Nc
+            ###dff
+            if self.use_semantics:
+                sample = {'rays': self.all_rays[rgb_sample_points, :8],
+                          'ts': self.all_rays[rgb_sample_points, 8].long(),
+                          'rgbs': self.all_rgbs[rgb_sample_points],
+                          'whole_img': img,
+                          'rgb_idx': img_sample_points,
+                          'min_scale_cur': min_scale_cur,
+                          'img_wh': self.all_imgs_wh[sample_ts],
+                          'uv_sample': uv_sample,
+                          ###dff
+                           'feature': self.all_features[rgb_sample_points,:]}
+            else:
+                sample = {'rays': self.all_rays[rgb_sample_points, :8],
+                          'ts': self.all_rays[rgb_sample_points, 8].long(),
+                          'rgbs': self.all_rgbs[rgb_sample_points],
+                          'whole_img': img,
+                          'rgb_idx': img_sample_points,
+                          'min_scale_cur': min_scale_cur,
+                          'img_wh': self.all_imgs_wh[sample_ts],
+                          'uv_sample': uv_sample}
+                
+            ###dff
+                    
         elif self.split in ['val', 'test_train', 'test_test']:
             sample = {}
             if self.split == 'val':
@@ -275,6 +432,20 @@ class PhototourismDataset(Dataset):
                 id_ = self.img_ids_test[idx]
             elif self.split == 'test_train':
                 id_ = self.img_ids_train[idx]
+            
+            ###dff
+            if self.use_semantics:    
+                if not self.features_path:
+                    feature_folder = os.path.join(self.root_dir, 'rgb_feature_langseg')
+                else:
+                    feature_folder = self.features_path
+
+                feature_path = os.path.join(feature_folder, os.path.splitext(self.image_paths[id_].split(".")[0])[0] + '_fmap_CxHxW.pt')
+            
+            
+                if not os.path.isfile(feature_path):
+                    return
+            ###dff
 
             sample['c2w'] = c2w = torch.FloatTensor(self.poses_dict[id_])
 
@@ -285,6 +456,8 @@ class PhototourismDataset(Dataset):
                 img_w = img_w//self.img_downscale
                 img_h = img_h//self.img_downscale
                 img_s = img.resize((img_w, img_h), Image.LANCZOS)
+            else:
+                img_s = img
             img_s = self.transform(img_s) # (3, h, w)
 
             img_s = img_s.view(3, -1).permute(1, 0) # (h*w, 3) RGB
@@ -309,8 +482,50 @@ class PhototourismDataset(Dataset):
 
             img_w, img_h = img.size
             img_8 = img.resize((img_w//self.img_downscale_appearance, img_h//self.img_downscale_appearance), Image.LANCZOS)
+            
+            ####
+            const_minSize = 33
+            if img_8.size[0] < const_minSize:
+                a = img_8.size[0] / const_minSize
+                img_8 = img.resize((int(img_8.size[0] // a), int(img_8.size[1] // a)), Image.LANCZOS)
+            if img_8.size[1] < const_minSize:
+                a = img_8.size[1] / const_minSize
+                img_8 = img.resize((int(img_8.size[0] // a), int(img_8.size[1] // a)), Image.LANCZOS)
+            ####
+            
             img_8 = self.normalize(self.transform(img_8)) # (3, h, w)
             sample['whole_img'] = img_8
+            
+            ###dff
+            if self.use_semantics:
+            
+                #print("feature_path", feature_path)
+                sample['feature'] = torch.load(feature_path)[None].float()
+                img_w, img_h = img.size
+                img_w = img_w//self.img_downscale
+                img_h = img_h//self.img_downscale
+                pix_idxs = np.arange(img_w*img_h)
+                feature_map = torch.load(feature_path)[None].float()  # chw->1chw
+                u = (pix_idxs % img_w / img_w) * 2 - 1
+                v = (pix_idxs // img_w/ img_h) * 2 - 1
+                with torch.no_grad():
+                    sampler = torch.tensor(np.stack([u, v], axis=-1)[None, None]).float()  # N2->11N2
+                    # TODO: sparse supervision
+                    feats = torch.nn.functional.grid_sample(feature_map, sampler, mode='bilinear', align_corners=True)  # 1c1N
+                    feats = feats[0, :, 0].T  # 1c1N->cN->Nc
+                    sample['feature'] = feats
+                # visualize PCA feature
+                visualize = False
+                if(visualize):
+                    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float32):
+                        #visfeat = feature_utils.feature_vis(sample['feature'],img_h)
+                        import matplotlib.pyplot as plt
+                        #plt.imsave("out/gt_feature.png",visfeat)
+                        #scores = self.clip_editor.calculate_selection_score(sample['feature'], query_features=self.clip_editor.text_features)
+                        #score_patch = scores.reshape(1, img_w, img_h, 1).permute(0, 3, 1, 2).detach()
+                        #score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+                        #plt.imsave("out/features_coarse_score.png",score_pred)
+            ###dff
 
         else:
             sample = {}

@@ -3,6 +3,7 @@ from datasets import PhototourismDataset
 import numpy as np
 import os
 import pickle
+import sys
 
 def get_opts():
     parser = argparse.ArgumentParser()
@@ -16,6 +17,7 @@ def get_opts():
 
 
 if __name__ == '__main__':
+    print(sys.argv)
     args = get_opts()
     os.makedirs(os.path.join(args.root_dir, 'cache'), exist_ok=True)
     print(f'Preparing cache for scale {args.img_downscale}...')

@@ -22,6 +22,13 @@ import json
 from PIL import Image
 from torchvision import transforms as T
 
+
+###dff
+import feature_utils
+import clip_utils
+import cv2
+###dff
+
 torch.backends.cudnn.benchmark = True
 
 def get_opts():
@@ -74,6 +81,15 @@ def get_opts():
     
     parser.add_argument('--save_dir', type=str, default="./",
                         help='pretrained checkpoint path to load')
+    
+    ###dff
+    parser.add_argument('--feature_dim', type=int, default=None)
+    parser.add_argument('--use_semantics', default=False, action="store_true",
+                        help='whether to use semantic labels')
+    parser.add_argument('--clipnerf_text', nargs='*', type=str, default=None)
+    parser.add_argument('--features_path', type=str, default=None)
+    
+    ###dff
 
     return parser.parse_args()
 
@@ -138,6 +154,11 @@ if __name__ == "__main__":
     else:
         kwargs['img_downscale'] = args.img_downscale
         kwargs['use_cache'] = args.use_cache
+        ###dff
+        kwargs['use_semantics'] = args.use_semantics
+        kwargs['feature_dim'] = args.feature_dim
+        kwargs['features_path'] = args.features_path
+        ###dff
     dataset = dataset_dict[args.dataset_name](**kwargs)
     scene = os.path.basename(args.root_dir.strip('/'))
 
@@ -163,21 +184,48 @@ if __name__ == "__main__":
             whole_img = normalize(img).unsqueeze(0).cuda()
             kwargs['a_embedded_from_img'] = enc_a(whole_img)
 
+    #nerf_coarse = NeRF('coarse',
+    #                    in_channels_xyz=6*args.N_emb_xyz+3,
+    #                    in_channels_dir=6*args.N_emb_dir+3).cuda()
+    #nerf_fine = NeRF('fine',
+    #                 in_channels_xyz=6*args.N_emb_xyz+3,
+    #                 in_channels_dir=6*args.N_emb_dir+3,
+    #                 encode_appearance=args.encode_a,
+    #                 in_channels_a=args.N_a).cuda()
+    #
+    ###dff
     nerf_coarse = NeRF('coarse',
-                        in_channels_xyz=6*args.N_emb_xyz+3,
-                        in_channels_dir=6*args.N_emb_dir+3).cuda()
+                    in_channels_xyz=6*args.N_emb_xyz+3,
+                    in_channels_dir=6*args.N_emb_dir+3,
+                    use_semantics=args.use_semantics,
+                    out_feature_dim=args.feature_dim).cuda()
+
     nerf_fine = NeRF('fine',
-                     in_channels_xyz=6*args.N_emb_xyz+3,
-                     in_channels_dir=6*args.N_emb_dir+3,
-                     encode_appearance=args.encode_a,
-                     in_channels_a=args.N_a).cuda()
+                    in_channels_xyz=6*args.N_emb_xyz+3,
+                    in_channels_dir=6*args.N_emb_dir+3,
+                    encode_appearance=args.encode_a,
+                    in_channels_a=args.N_a,
+                    use_semantics=args.use_semantics,
+                    out_feature_dim=args.feature_dim).cuda()
 
     load_ckpt(nerf_coarse, args.ckpt_path, model_name='nerf_coarse')
     load_ckpt(nerf_fine, args.ckpt_path, model_name='nerf_fine')
 
     models = {'coarse': nerf_coarse, 'fine': nerf_fine}
+    
+    if args.use_semantics:
+        clip_editor = clip_utils.CLIPEditor()
+        clip_editor.text_features = clip_editor.encode_text([t.replace('_', ' ') for t in args.clipnerf_text])
+        print([t.replace('_', ' ') for t in args.clipnerf_text])
+        print(clip_editor.text_features @ clip_editor.text_features.T)
+        print("shape",clip_editor.text_features.shape)
+    ###dff
 
     imgs, psnrs, ssims = [], [], []
+    ###dff
+    f_gt, f_c, f_f = [], [], []
+    s_gt, s_c, s_f = [], [], []
+    ###dff
     dir_name = os.path.join(args.save_dir, f'results/{args.dataset_name}/{args.scene_name}')
     os.makedirs(dir_name, exist_ok=True)
 
@@ -318,17 +366,118 @@ if __name__ == "__main__":
                 dataset.poses_test[i, 1, 3] += dy[i]
                 dataset.poses_test[i, 2, 3] += dz[i]
                 dataset.poses_test[i, :, :3] = np.dot(eulerAnglesToRotationMatrix([theta_x[i],theta_y[i],theta_z[i]]), dataset.poses_test[i, :, :3])
+        ###dff
+        elif scene == 'test_undistorted':
+
+            # select appearance embedding, hard-coded for each scene
+            # interpolate between multiple cameras to generate path
+            # dataset.poses_test = generate_camera_path(dataset)
+            img = Image.open(os.path.join(args.root_dir, 'dense/images',
+                                          dataset.image_paths[dataset.img_ids_train[314]])).convert('RGB')  # 111 159 178 208 252 314
+            img_downscale = 4
+            img_w, img_h = img.size
+            img_w = img_w // img_downscale
+            img_h = img_h // img_downscale
+            img = img.resize((img_w, img_h), Image.LANCZOS)
+            toTensor = T.ToTensor()
+            normalize = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            img = toTensor(img)  # (3, h, w)
+            whole_img = normalize(img).unsqueeze(0).cuda()
+            kwargs['a_embedded_from_img'] = enc_a(whole_img)
+
+            dataset.test_appearance_idx = 314  # 85572957_6053497857.jpg
+            # N_frames = 30 * 8
+            N_frames = 24
+
+            dx = np.linspace(-0.2, 0.2, N_frames)   # + right
+            # dx = np.linspace(0, 1, N_frames)
+            # dx = np.linspace(-0.5, 0.6, N_frames)
+            # dx = np.linspace(-0., 0, N_frames)
+
+
+            # dx1 = np.linspace(-0, 0, 2*N_frames//3)
+            # dx2 = np.linspace(-0.3, 0.3, N_frames - 2*N_frames//3)
+            # dx = np.concatenate((dx1, dx2))
+
+
+            dy1 = np.linspace(-0., 0, N_frames // 2)  # + down
+            dy2 = np.linspace(-0., 0, N_frames - N_frames // 2)
+            dy = np.concatenate((dy1, dy2))
+
+
+
+            # dy1 = np.linspace(-0, 0, N_frames//3)
+            # dy2 = np.linspace(-0.05, 0.05, N_frames//3)
+            # dy3 = np.linspace(-0, 0,  N_frames - 2*N_frames // 3)
+            # dy = np.concatenate((dy1, dy2,dy3))
+
+
+            # dz1 = np.linspace(0, 3, N_frames // 2)  # + foaward
+            # dz2 = np.linspace(-3, 0, N_frames - N_frames // 2)  # + foaward
+            # dz = np.concatenate((dz1, dz2))
+
+            # dz = np.linspace(0, (5/6), N_frames)
+            # dz = np.linspace((7 / 11) * (5 / 6), (7 / 11) * (5 / 6), N_frames)
+            # dz = np.linspace((6 / 11) * (5 / 6), (6 / 11) * (5 / 6), N_frames)
+
+
+            # dz1 = np.linspace(-0.1, 0.1, N_frames//3)
+            # dz2 = np.linspace(-0, 0, N_frames - N_frames//3)
+            # dz = np.concatenate((dz1, dz2))
+
+            dz = np.linspace(0, 0, N_frames)
+
+            # theta_x1 = np.linspace(math.pi / 30, 0, N_frames // 2)
+            # theta_x2 = np.linspace(0, math.pi / 30, N_frames - N_frames // 2)
+            # theta_x = np.concatenate((theta_x1, theta_x2))
+            #
+            # theta_y = np.linspace(math.pi / 10, -math.pi / 10, N_frames)
+
+            theta_x = np.linspace(0, 0, N_frames)
+            theta_y = np.linspace(0, 0, N_frames)
+            theta_z = np.linspace(0, 0, N_frames)
+            # define poses
+            dataset.poses_test = np.tile(dataset.poses_dict[25], (N_frames, 1, 1))
+            for i in range(N_frames):
+                dataset.poses_test[i, 0, 3] += dx[i]
+                dataset.poses_test[i, 1, 3] += dy[i]
+                dataset.poses_test[i, 2, 3] += dz[i]
+                dataset.poses_test[i, :, :3] = np.dot(eulerAnglesToRotationMatrix([theta_x[i],theta_y[i],theta_z[i]]), dataset.poses_test[i, :, :3])
+            # dataset.poses_test = generate_camera_path(dataset)
+            ###dff
         else:
+            # pass
             raise NotImplementedError
+        
         kwargs['output_transient'] = False
+    ###dff
+    #ts_list = [17, 23, 29, 89, 117, 131, 633]
+    #ts_list = [2,3,4,5]
+    ###dff
+    
 
     for i in tqdm(range(len(dataset))):
+        ###dff        
+        if not dataset[i]:
+                continue
+        ###dff
         sample = dataset[i]
         rays = sample['rays']
         ts = sample['ts']
-        if args.split == 'test_test' and args.encode_a:
+        ###dff
+        if args.use_semantics:
+            feature_gt = sample['feature']
+        #if ts[0] not in ts_list:
+        #        continue
+        ###dff
+
+        if (args.split == 'test_train' or args.split == 'test_test') and args.encode_a:
             whole_img = sample['whole_img'].unsqueeze(0).cuda()
             kwargs['a_embedded_from_img'] = enc_a(whole_img)
+            w, h = sample['img_wh']
+            img_GT = np.clip(sample['rgbs'].view(h, w, 3).cpu().numpy(), 0, 1)
+            img_GT_ = (img_GT*255).astype(np.uint8)
+            
         results = batched_inference(models, embeddings, rays.cuda(), ts.cuda(),
                                     args.N_samples, args.N_importance, args.use_disp,
                                     args.chunk,
@@ -343,7 +492,52 @@ if __name__ == "__main__":
         img_pred = np.clip(results['rgb_fine'].view(h, w, 3).cpu().numpy(), 0, 1)
         img_pred_ = (img_pred*255).astype(np.uint8)
         imgs += [img_pred_]
-        imageio.imwrite(os.path.join(dir_name, f'{i:03d}.png'), img_pred_)
+        imageio.imwrite(os.path.join(dir_name, f'{ts[0]:03d}.png'), img_pred_)
+        imageio.imwrite(os.path.join(dir_name, f'{ts[0]:03d}_gt.png'), img_GT_)
+        
+        
+        ###dff
+        if args.use_semantics:
+            
+            #visfeat_c_ = feature_utils.feature_vis(results[f'features_coarse'],h)
+            #imageio.imwrite(os.path.join(dir_name, f'{i:03d}_f_c.png'), visfeat_c_)
+            #f_c += [visfeat_c_]
+            visfeat_f_ = feature_utils.feature_vis(results[f'features_fine'],h)
+            imageio.imwrite(os.path.join(dir_name, f'{ts[0]:03d}_f_f.png'), visfeat_f_)
+            f_f += [visfeat_f_]
+            visfeat_gt_ = feature_utils.feature_vis(feature_gt,h)
+            imageio.imwrite(os.path.join(dir_name, f'{ts[0]:03d}_f_gt.png'), visfeat_gt_)
+            f_gt += [visfeat_gt_]
+            
+            #scores = clip_editor.calculate_selection_score(results[f'features_coarse'], query_features=clip_editor.text_features)
+            #score_patch = scores.reshape(1, h, w, 1).permute(0, 3, 1, 2).detach()
+            #score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+            #activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+            #activation_heatmap = cv2.cvtColor(activation_heatmap, cv2.COLOR_BGR2RGB)
+            #imageio.imwrite(os.path.join(dir_name, f'{i:03d}_s_c.png'), activation_heatmap)
+            #s_c += [activation_heatmap]
+            
+            scores = clip_editor.calculate_selection_score(results[f'features_fine'].cuda(), query_features=clip_editor.text_features.cuda())
+            score_patch = scores.reshape(1, h, w, 1).permute(0, 3, 1, 2).detach()
+            score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+            activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+            activation_heatmap = cv2.cvtColor(activation_heatmap, cv2.COLOR_BGR2RGB)
+            imageio.imwrite(os.path.join(dir_name, f'{ts[0]:03d}_s_f.png'), activation_heatmap)
+            s_f += [activation_heatmap]
+            
+            scores = clip_editor.calculate_selection_score(feature_gt.cuda(), query_features=clip_editor.text_features.cuda())
+            score_patch = scores.reshape(1, h, w, 1).permute(0, 3, 1, 2).detach()
+            score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+            activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+            activation_heatmap = cv2.cvtColor(activation_heatmap, cv2.COLOR_BGR2RGB)
+            imageio.imwrite(os.path.join(dir_name, f'{ts[0]:03d}_s_gt.png'), activation_heatmap)
+            s_gt += [activation_heatmap]
+    ###dff
+            
+            
+        
+        
+        ###dff
         
     if args.dataset_name == 'blender' or \
       (args.dataset_name == 'phototourism' and args.split == 'test'):

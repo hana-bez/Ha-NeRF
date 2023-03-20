@@ -10,6 +10,7 @@ from datasets import dataset_dict
 
 from math import sqrt
 
+
 # models
 from models.nerf import *
 from models.rendering import *
@@ -33,6 +34,13 @@ from datasets import global_val
 
 import random
 
+###dff
+import feature_utils
+import matplotlib.pyplot as plt
+import clip_utils
+import cv2
+###dff
+
 class NeRFSystem(LightningModule):
     def __init__(self, hparams):
         super().__init__()
@@ -51,19 +59,41 @@ class NeRFSystem(LightningModule):
             self.enc_a = E_attr(3, hparams.N_a)
             self.models_to_train += [self.enc_a]
             self.embedding_a_list = [None] * hparams.N_vocab
-
-        self.nerf_coarse = NeRF('coarse',
-                                in_channels_xyz=6*hparams.N_emb_xyz+3,
-                                in_channels_dir=6*hparams.N_emb_dir+3)
+            
+        #dff
+        if hparams.use_semantics:
+            self.nerf_coarse = NeRF('coarse',
+                                    in_channels_xyz=6*hparams.N_emb_xyz+3,
+                                    in_channels_dir=6*hparams.N_emb_dir+3,
+                                    use_semantics=hparams.use_semantics,
+                                    out_feature_dim=hparams.feature_dim)
+        else:
+        #dff
+            self.nerf_coarse = NeRF('coarse',
+                                    in_channels_xyz=6*hparams.N_emb_xyz+3,
+                                    in_channels_dir=6*hparams.N_emb_dir+3)
+            
         self.models = {'coarse': self.nerf_coarse}
 
         if hparams.N_importance > 0:
-            self.nerf_fine = NeRF('fine',
-                                  in_channels_xyz=6*hparams.N_emb_xyz+3,
-                                  in_channels_dir=6*hparams.N_emb_dir+3,
-                                  encode_appearance=hparams.encode_a,
-                                  in_channels_a=hparams.N_a,
-                                  encode_random=hparams.encode_random)
+            #dff
+            if hparams.use_semantics:
+                self.nerf_fine = NeRF('fine',
+                                      in_channels_xyz=6*hparams.N_emb_xyz+3,
+                                      in_channels_dir=6*hparams.N_emb_dir+3,
+                                      encode_appearance=hparams.encode_a,
+                                      in_channels_a=hparams.N_a,
+                                      encode_random=hparams.encode_random,
+                                      use_semantics=hparams.use_semantics,
+                                      out_feature_dim=hparams.feature_dim)
+            else:
+            #dff
+                self.nerf_fine = NeRF('fine',
+                                      in_channels_xyz=6*hparams.N_emb_xyz+3,
+                                      in_channels_dir=6*hparams.N_emb_dir+3,
+                                      encode_appearance=hparams.encode_a,
+                                      in_channels_a=hparams.N_a,
+                                      encode_random=hparams.encode_random)
 
             self.models['fine'] = self.nerf_fine
         self.models_to_train += [self.models]
@@ -145,6 +175,12 @@ class NeRFSystem(LightningModule):
             kwargs['batch_size'] = self.hparams.batch_size
             kwargs['scale_anneal'] = self.hparams.scale_anneal
             kwargs['min_scale'] = self.hparams.min_scale
+            ###dff
+            kwargs['use_semantics'] = self.hparams.use_semantics
+            kwargs['feature_dim'] = self.hparams.feature_dim
+            kwargs['features_path'] = self.hparams.features_path
+            kwargs['num_of_img'] = self.hparams.num_of_img
+            ###dff
         elif self.hparams.dataset_name == 'blender':
             kwargs['img_wh'] = tuple(self.hparams.img_wh)
             kwargs['perturbation'] = self.hparams.data_perturb
@@ -155,6 +191,14 @@ class NeRFSystem(LightningModule):
                 kwargs['NeuralRenderer_downsampleto'] = (self.hparams.NRDS, self.hparams.NRDS)
         self.train_dataset = dataset(split='train', **kwargs)
         self.val_dataset = dataset(split='val', **kwargs)
+        ###dff
+        if self.hparams.use_semantics:
+            self.clip_editor = clip_utils.CLIPEditor()
+            self.clip_editor.text_features = self.clip_editor.encode_text(
+                    [t.replace('_', ' ') for t in hparams.clipnerf_text])
+            print([t.replace('_', ' ') for t in hparams.clipnerf_text])
+        #print(self.clip_editor.text_filter_features @ self.clip_editor.text_filter_features.T)
+        ###dff
 
     def configure_optimizers(self):
         self.optimizer = get_optimizer(self.hparams, self.models_to_train)
@@ -164,14 +208,14 @@ class NeRFSystem(LightningModule):
     def train_dataloader(self):
         return DataLoader(self.train_dataset,
                           shuffle=False,
-                          num_workers=4,
+                          num_workers=0,
                           batch_size=1, # self.hparams.batch_size a time
                           pin_memory=True)
 
     def val_dataloader(self):
         return DataLoader(self.val_dataset,
                           shuffle=False,
-                          num_workers=4,
+                          num_workers=0,
                           batch_size=1, # validate one image (H*W rays) at a time
                           pin_memory=True)
     
@@ -179,6 +223,10 @@ class NeRFSystem(LightningModule):
         rays, ts = batch['rays'].squeeze(), batch['ts'].squeeze()
         rgbs = batch['rgbs'].squeeze()
         uv_sample = batch['uv_sample'].squeeze()
+        ###dff
+        if self.hparams.use_semantics:
+            features_lseg = batch['feature'].squeeze()
+        ###dff
         if self.hparams.encode_a or self.hparams.use_mask:
             whole_img = batch['whole_img']
             rgb_idx = batch['rgb_idx']
@@ -190,7 +238,56 @@ class NeRFSystem(LightningModule):
 
         test_blender = False
         results = self(rays, ts, whole_img, W, H, rgb_idx, uv_sample, test_blender)
-        loss_d, AnnealingWeight = self.loss(results, rgbs, self.hparams, self.global_step)
+        ####
+        #%%
+        import matplotlib.pyplot as plt
+        dim=32
+        
+        if False:
+            img_pred = np.clip(results['rgb_fine'].detach().view(dim, dim, 3).cpu().numpy(), 0, 1)
+            x = (img_pred * 255).astype(np.uint8)
+            plt.imsave("dff_out_mode_seeking/pred.png",img_pred)
+
+            img_pred = np.clip(rgbs.detach().view(dim, dim, 3).cpu().numpy(), 0, 1)
+            imgpred = (img_pred * 255).astype(np.uint8)
+            plt.imsave("dff_out_mode_seeking/gt.png",imgpred)
+
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float32):
+                visfeat = feature_utils.feature_vis(results[f'features_coarse'],dim)
+                plt.imsave("dff_out_mode_seeking/coarse_pred_feature.png",visfeat)
+                visfeat = feature_utils.feature_vis(results[f'features_fine'],dim)
+                plt.imsave("dff_out_mode_seeking/fine_pred_feature.png",visfeat)
+                visfeat = feature_utils.feature_vis(features_lseg,dim)
+                plt.imsave("dff_out_mode_seeking/features_lseg.png",visfeat)
+
+
+                scores = self.clip_editor.calculate_selection_score(results[f'features_coarse'], query_features=self.clip_editor.text_features)
+                score_patch = scores.reshape(1, dim, dim, 1).permute(0, 3, 1, 2).detach()
+                score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+                activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+                cv2.imwrite("dff_out_mode_seeking/features_coarse_score.png", activation_heatmap)
+
+                scores = self.clip_editor.calculate_selection_score(results[f'features_fine'], query_features=self.clip_editor.text_features)
+                score_patch = scores.reshape(1, dim, dim, 1).permute(0, 3, 1, 2).detach()
+                score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+                activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+                cv2.imwrite("dff_out_mode_seeking/features_fine_score.png", activation_heatmap)
+
+                scores = self.clip_editor.calculate_selection_score(features_lseg, query_features=self.clip_editor.text_features)
+                score_patch = scores.reshape(1, dim, dim, 1).permute(0, 3, 1, 2).detach()
+                score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+                activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+                cv2.imwrite("dff_out_mode_seeking/features_gt_score.png", activation_heatmap)
+
+        
+        #####
+        #%%
+        ###dff
+        if self.hparams.use_semantics:
+            loss_d, AnnealingWeight = self.loss(results, rgbs, self.hparams, self.global_step,features_lseg)
+        else:
+            loss_d, AnnealingWeight = self.loss(results, rgbs, self.hparams, self.global_step)
+        ###dff
         loss = sum(l for l in loss_d.values())
 
         with torch.no_grad():
@@ -209,6 +306,31 @@ class NeRFSystem(LightningModule):
             img = results[f'rgb_{typ}'].detach().view(H, W, 3).permute(2, 0, 1).cpu() # (3, H, W)
             img_gt = rgbs.detach().view(H, W, 3).permute(2, 0, 1).cpu() # (3, H, W)
             depth = visualize_depth(results[f'depth_{typ}'].detach().view(H, W)) # (3, H, W)
+            
+            ###dff
+            if hparams.use_semantics:
+                scores = self.clip_editor.calculate_selection_score(results[f'features_coarse'], query_features=self.clip_editor.text_features)
+                score_patch = scores.reshape(1, H, W, 1).permute(0, 3, 1, 2).detach()
+                score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+                activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+                activation_heatmap = cv2.cvtColor(activation_heatmap, cv2.COLOR_BGR2RGB)
+                activation_heatmap_coarse = torch.from_numpy(activation_heatmap).permute(2, 0, 1)
+                
+                scores = self.clip_editor.calculate_selection_score(results[f'features_fine'], query_features=self.clip_editor.text_features)
+                score_patch = scores.reshape(1, H, W, 1).permute(0, 3, 1, 2).detach()
+                score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+                activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+                activation_heatmap = cv2.cvtColor(activation_heatmap, cv2.COLOR_BGR2RGB)
+                activation_heatmap_fine = torch.from_numpy(activation_heatmap).permute(2, 0, 1)
+
+                scores = self.clip_editor.calculate_selection_score(features_lseg, query_features=self.clip_editor.text_features)
+                score_patch = scores.reshape(1, H, W, 1).permute(0, 3, 1, 2).detach()
+                score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+                activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+                activation_heatmap = cv2.cvtColor(activation_heatmap, cv2.COLOR_BGR2RGB)
+                activation_heatmap_gt = torch.from_numpy(activation_heatmap).permute(2, 0, 1)
+            ###dff
+            
             if self.hparams.use_mask:
                 mask = results['out_mask'].detach().view(H, W, 1).permute(2, 0, 1).repeat(3, 1, 1).cpu() # (3, H, W)
                 if 'rgb_fine_random' in results:
@@ -222,7 +344,12 @@ class NeRFSystem(LightningModule):
                                                       stack, self.global_step)
             elif 'rgb_fine_random' in results:
                 img_random = results[f'rgb_fine_random'].detach().view(H, W, 3).permute(2, 0, 1).cpu() # (3, H, W)
-                stack = torch.stack([img_gt, img, depth, img_random]) # (4, 3, H, W)
+                ###dff
+                if hparams.use_semantics:
+                    stack = torch.stack([img_gt, img, depth, img_random,activation_heatmap_gt,activation_heatmap_fine,activation_heatmap_coarse])
+                else:
+                    stack = torch.stack([img_gt, img, depth, img_random]) # (4, 3, H, W)
+                ###dff
                 self.logger.experiment.add_images('train/GT_pred_depth_random',
                                                   stack, self.global_step)
             else:
@@ -242,6 +369,10 @@ class NeRFSystem(LightningModule):
         else:
             W, H = self.hparams.img_wh
             uv_sample = None
+        ###dff
+        if self.hparams.use_semantics:
+            features_lseg = batch['feature'].squeeze()
+        ###dff
 
         if self.hparams.encode_a or self.hparams.use_mask or self.hparams.deocclusion:
             if self.hparams.dataset_name == 'phototourism':
@@ -255,7 +386,12 @@ class NeRFSystem(LightningModule):
 
         test_blender = (self.hparams.dataset_name == 'blender')
         results = self(rays, ts, whole_img, W, H, rgb_idx, uv_sample, test_blender)
-        loss_d, AnnealingWeight = self.loss(results, rgbs, self.hparams, self.global_step)
+        ###dff
+        if self.hparams.use_semantics:
+            loss_d, AnnealingWeight = self.loss(results, rgbs, self.hparams, self.global_step,features_lseg)
+        else:
+            loss_d, AnnealingWeight = self.loss(results, rgbs, self.hparams, self.global_step)
+        #dff
         loss = sum(l for l in loss_d.values())
         log = {'val_loss': loss}
         for k, v in loss_d.items():
@@ -263,7 +399,33 @@ class NeRFSystem(LightningModule):
         
         typ = 'fine' if 'rgb_fine' in results else 'coarse'
         img = results[f'rgb_{typ}'].view(H, W, 3).permute(2, 0, 1).cpu() # (3, H, W)
+
         img_gt = rgbs.view(H, W, 3).permute(2, 0, 1).cpu() # (3, H, W)
+        
+                    ###dff
+        if hparams.use_semantics:
+            scores = self.clip_editor.calculate_selection_score(results[f'features_coarse'], query_features=self.clip_editor.text_features)
+            score_patch = scores.reshape(1, H, W, 1).permute(0, 3, 1, 2).detach()
+            score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+            activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+            activation_heatmap = cv2.cvtColor(activation_heatmap, cv2.COLOR_BGR2RGB)
+            activation_heatmap_coarse = torch.from_numpy(activation_heatmap).permute(2, 0, 1)
+            
+            scores = self.clip_editor.calculate_selection_score(results[f'features_fine'], query_features=self.clip_editor.text_features)
+            score_patch = scores.reshape(1, H, W, 1).permute(0, 3, 1, 2).detach()
+            score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+            activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+            activation_heatmap = cv2.cvtColor(activation_heatmap, cv2.COLOR_BGR2RGB)
+            activation_heatmap_fine = torch.from_numpy(activation_heatmap).permute(2, 0, 1)
+
+            scores = self.clip_editor.calculate_selection_score(features_lseg, query_features=self.clip_editor.text_features)
+            score_patch = scores.reshape(1, H, W, 1).permute(0, 3, 1, 2).detach()
+            score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]
+            activation_heatmap = cv2.applyColorMap(score_pred, cv2.COLORMAP_JET)
+            activation_heatmap = cv2.cvtColor(activation_heatmap, cv2.COLOR_BGR2RGB)
+            activation_heatmap_gt = torch.from_numpy(activation_heatmap).permute(2, 0, 1)
+        ###dff
+        
         if batch_nb == 0:
             depth = visualize_depth(results[f'depth_{typ}'].view(H, W)) # (3, H, W)
             if self.hparams.use_mask:
@@ -279,11 +441,19 @@ class NeRFSystem(LightningModule):
                                                       stack, self.global_step)
             elif 'rgb_fine_random' in results:
                 img_random = results[f'rgb_fine_random'].detach().view(H, W, 3).permute(2, 0, 1).cpu() # (3, H, W)
-                stack = torch.stack([img_gt, img, depth, img_random]) # (4, 3, H, W)
+
+                ###dff
+                if hparams.use_semantics:
+                    stack = torch.stack([img_gt, img, depth, img_random,activation_heatmap_gt,activation_heatmap_fine,activation_heatmap_coarse])
+                else:
+                    stack = torch.stack([img_gt, img, depth, img_random]) # (4, 3, H, W)
+                ###dff
+
                 self.logger.experiment.add_images('val/GT_pred_depth_random',
                                                   stack, self.global_step)
             else:
                 stack = torch.stack([img_gt, img, depth]) # (3, 3, H, W)
+
                 self.logger.experiment.add_images('val/GT_pred_depth',
                                                   stack, self.global_step)
 
@@ -313,6 +483,7 @@ class NeRFSystem(LightningModule):
             self.log('val/r_md', torch.stack([x['r_md'] for x in outputs]).mean())
 
 def main(hparams):
+
     system = NeRFSystem(hparams)
     checkpoint_callback = \
         ModelCheckpoint(filepath=os.path.join(hparams.save_dir,
@@ -340,7 +511,96 @@ def main(hparams):
                       profiler="simple" if hparams.num_gpus==1 else None)
 
     trainer.fit(system)
+    
+def main_train_mask_grid_sample(hparams):
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+    system = NeRFSystem(hparams)
+    checkpoint_callback = \
+        ModelCheckpoint(filepath=os.path.join(hparams.save_dir,
+                                              f'ckpts/{hparams.exp_name}', '{epoch:d}'),
+                        monitor='val/psnr',
+                        mode='max',
+                        save_top_k=-1)
+
+    logger = TestTubeLogger(save_dir=os.path.join(hparams.save_dir,"logs"),
+                            name=hparams.exp_name,
+                            debug=False,
+                            create_git_tag=False,
+                            log_graph=False)
+
+
+    enc_a = E_attr(3, hparams.N_a).cuda()
+    load_ckpt(enc_a, hparams.ckpt_path, model_name='enc_a')
+
+    system.enc_a = enc_a
+    system.models_to_train[0] = enc_a
+                #dff
+
+    nerf_coarse = NeRF('coarse',
+                    in_channels_xyz=6*hparams.N_emb_xyz+3,
+                    in_channels_dir=6*hparams.N_emb_dir+3,
+                    use_semantics=hparams.use_semantics,
+                    out_feature_dim=hparams.feature_dim)
+
+    nerf_fine = NeRF('fine',
+                    in_channels_xyz=6*hparams.N_emb_xyz+3,
+                    in_channels_dir=6*hparams.N_emb_dir+3,
+                    encode_appearance=hparams.encode_a,
+                    in_channels_a=hparams.N_a,
+                    encode_random=hparams.encode_random,
+                    use_semantics=hparams.use_semantics,
+                    out_feature_dim=hparams.feature_dim)
+
+
+    load_ckpt(nerf_coarse, hparams.ckpt_path, model_name='nerf_coarse')
+    load_ckpt(nerf_fine, hparams.ckpt_path, model_name='nerf_fine')
+
+    system.models['coarse'] = nerf_coarse
+    system.models['fine'] = nerf_fine
+
+    system.models_to_train[1]['coarse'] = nerf_coarse
+    system.models_to_train[1]['fine'] = nerf_fine
+
+    system.nerf_coarse = nerf_coarse
+    system.nerf_fine = nerf_fine
+
+
+    if hparams.continue_train_semantic:
+        # Freeze weights for not semantic layers
+        for param in system.parameters():
+            param.requires_grad = False
+
+        for param in system.nerf_coarse.features.parameters():
+            param.requires_grad = True
+
+        for param in system.nerf_fine.features.parameters():
+            param.requires_grad = True
+
+
+    trainer = Trainer(max_epochs=hparams.num_epochs,
+                      checkpoint_callback=checkpoint_callback,
+                      # resume_from_checkpoint=hparams.ckpt_path,
+                      logger=logger,
+                      weights_summary=None,
+                      progress_bar_refresh_rate=hparams.refresh_every,
+                      gpus= hparams.num_gpus,
+                      accelerator='ddp' if hparams.num_gpus>1 else None,
+                      num_sanity_val_steps=-1,
+                      benchmark=True,
+                      profiler="simple" if hparams.num_gpus==1 else None)
+
+    trainer.fit(system)
 
 if __name__ == '__main__':
-    hparams = get_opts()
-    main(hparams)
+    try:
+        hparams = get_opts()
+        ###dff
+        if hparams.continue_train_semantic and hparams.use_semantics:
+            main_train_mask_grid_sample(hparams)
+        else: 
+        ###dff
+            main(hparams)
+    except:
+        print("An exception occurred")
+        

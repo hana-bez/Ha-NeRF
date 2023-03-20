@@ -16,6 +16,10 @@ import math
 from PIL import Image
 from torchvision import transforms as T
 
+###dff
+import feature_utils
+###dff
+
 torch.backends.cudnn.benchmark = True
 
 def get_opts():
@@ -244,6 +248,12 @@ if __name__ == "__main__":
             img_pred = np.clip(results['rgb_fine'].view(h, w, 3).cpu().numpy(), 0, 1)
             img_pred_ = (img_pred*255).astype(np.uint8)
             imgs += [img_pred_]
+            ###dff
+            visfeat_c_ = feature_utils.feature_vis(results[f'features_coarse'],h)
+            visfeat_c += [visfeat_c_]
+            visfeat = feature_utils.feature_vis(results[f'features_fine'],h)
+            visfeat = feature_utils.feature_vis(features_lseg,dim)
+            ###dff
 
             imageio.imwrite(os.path.join(dir_name, f'{fig_name}_{i:03d}.png'), img_pred_)
         imageio.mimsave(os.path.join(dir_name, f'{fig_name}.gif'), imgs, fps=30)

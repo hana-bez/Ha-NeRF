@@ -128,8 +128,15 @@ def render_rays(models,
             out = rearrange(out, '(n1 n2) c -> n1 n2 c', n1=N_rays, n2=N_samples_)
             static_rgbs = out[..., :3] # (N_rays, N_samples_, 3)
             static_sigmas = out[..., 3] # (N_rays, N_samples_)
-            if output_random:
-                static_rgbs_random = out[..., 4:]
+            ###dff
+            if model.use_semantics and not model.skip_feature:
+                features = out[..., 4:516]
+                if output_random:
+                    static_rgbs_random = out[..., 516:]
+            else:
+            ###dff
+                if output_random:
+                    static_rgbs_random = out[..., 4:]
 
         # Convert these values using volume rendering
         deltas = z_vals[:, 1:] - z_vals[:, :-1] # (N_rays, N_samples_-1)
@@ -164,8 +171,14 @@ def render_rays(models,
             if white_back:
                 rgb_map_random += 1-rearrange(weights_sum, 'n -> n 1')
             results[f'rgb_{typ}_random'] = rgb_map_random
-
+        ###dff
+        if model.use_semantics and not model.skip_feature: 
+            results[f'features_{typ}'] = reduce(rearrange(weights, 'n1 n2 -> n1 n2 1')*features,
+                                               'n1 n2 c -> n1 c', 'sum')
+        ###dff
+            
         results[f'depth_{typ}'] = reduce(weights*z_vals, 'n1 n2 -> n1', 'sum')
+        ###TODO:render efficiently option
         return
 
     embedding_xyz, embedding_dir = embeddings['xyz'], embeddings['dir']
