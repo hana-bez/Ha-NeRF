@@ -58,20 +58,21 @@ class CLIPEditor(object):
         return text_features
 
     def calculate_selection_score(self, features, query_features=None):
-        features /= features.norm(dim=-1, keepdim=True)
-        query_features /= query_features.norm(dim=-1, keepdim=True)
-        scores = features.half() @ query_features.T.half()  # (N_points, n_texts)
-        if scores.shape[-1] == 1:
-            ret = scores[:, 0]# (N_points,)
-            ret = (ret-torch.min(ret)) /(torch.max(ret)-torch.min(ret))
-            #print(torch.max(ret))
-            #print(torch.min(ret))
-        else:
-            scores = torch.nn.functional.softmax(scores, dim=-1)  # (N_points, n_texts)
-            scores[:, 0] = scores[:,[0]].sum(-1)  # (N_points, )
-            actual_scores = scores[:, 0]
-            scores = torch.isin(torch.argmax(scores, dim=-1), torch.tensor(0).cuda()).float()
-            ret = scores*actual_scores
-            #ret = ret/torch.max(ret)
-        return ret
+        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float32):
+            normalized_features = features / features.norm(dim=-1, keepdim=True)
+            query_features /= query_features.norm(dim=-1, keepdim=True)
+            scores = normalized_features.half() @ query_features.T.half()  # (N_points, n_texts)
+            if scores.shape[-1] == 1:
+                ret = scores[:, 0]# (N_points,)
+                ret = (ret-torch.min(ret)) /(torch.max(ret)-torch.min(ret))
+                #print(torch.max(ret))
+                #print(torch.min(ret))
+            else:
+                scores = torch.nn.functional.softmax(scores, dim=-1)  # (N_points, n_texts)
+                scores[:, 0] = scores[:,[0]].sum(-1)  # (N_points, )
+                actual_scores = scores[:, 0]
+                scores = torch.isin(torch.argmax(scores, dim=-1), torch.tensor(0).cuda()).float()
+                ret = scores*actual_scores
+                #ret = ret/torch.max(ret)
+            return ret
 
